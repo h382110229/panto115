@@ -3,12 +3,69 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Panto115</title>
+    <title>Panto115 — 网盘聚合搜索</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <h1>Panto115</h1>
-    <p>115 网盘聚合管理前端 — 开发中</p>
+    <!-- Toast 通知 -->
+    <div id="toast" class="toast hidden"></div>
+
+    <div class="container">
+        <!-- 头部 -->
+        <header class="header">
+            <div class="header-left">
+                <h1>Panto115</h1>
+                <span class="subtitle">多网盘资源聚合 · 一键转存</span>
+            </div>
+            <div class="header-right">
+                <div id="status-indicator" class="status-badge checking">
+                    <span class="dot"></span>
+                    <span class="status-text">检测中...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- 搜索区 -->
+        <div class="search-section">
+            <div class="search-bar">
+                <input type="text" id="search-input" placeholder="搜索资源、粘贴磁力链接或 115 分享链接..." autocomplete="off">
+                <button id="search-btn" class="btn-primary">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                    搜索
+                </button>
+            </div>
+            <div class="filter-tags">
+                <button class="tag active" data-pan="all">全部</button>
+                <button class="tag" data-pan="115">115</button>
+                <button class="tag" data-pan="quark">夸克</button>
+                <button class="tag" data-pan="aliyun">阿里</button>
+                <button class="tag" data-pan="baidu">百度</button>
+                <button class="tag" data-pan="xunlei">迅雷</button>
+            </div>
+        </div>
+
+        <!-- 结果统计 -->
+        <div id="results-info" class="results-info hidden"></div>
+
+        <!-- 加载骨架屏 -->
+        <div id="skeleton" class="skeleton-grid hidden">
+            <div class="skeleton-card"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div>
+            <div class="skeleton-card"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div>
+            <div class="skeleton-card"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div>
+        </div>
+
+        <!-- 结果列表 -->
+        <div id="results-list" class="results-grid"></div>
+
+        <!-- 空状态 -->
+        <div id="empty-state" class="empty-state">
+            <div class="empty-icon">🔍</div>
+            <p>输入关键词搜索多网盘资源</p>
+            <p class="empty-hint">支持 115、夸克、阿里云盘、百度网盘等资源聚合搜索</p>
+            <p class="empty-hint">也可直接粘贴磁力链接或 115 分享链接进行转存</p>
+        </div>
+    </div>
+
     <script src="app.js"></script>
 </body>
 </html>

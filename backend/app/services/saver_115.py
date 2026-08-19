@@ -28,6 +28,7 @@ import time
 from typing import Optional
 
 import httpx
+from curl_cffi.requests import Session as CurlSession
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ _API_SHARE_SAVE = "https://115cdn.com/webapi/share/save"
 _API_OFFLINE_ADD = "https://lixian.115.com/lixianssp/?ac=add_task_urls"
 _API_OFFLINE_LIST = "https://lixian.115.com/lixian/?ct=lixian&ac=task_lists"
 
-_UA_115_BROWSER = "Mozilla/5.0 115Browser/27.0.5.7"
+_UA_115_BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 _UA_DEFAULT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -230,6 +231,8 @@ class Pan115Saver:
         self._headers = {
             "User-Agent": _UA_115_BROWSER,
             "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8",
+            "Referer": "https://115.com/",
             "Cookie": self._cookie,
         }
 
@@ -238,6 +241,16 @@ class Pan115Saver:
             raise ValueError(
                 "115 Cookie 未配置。请设置环境变量 COOKIE_115 或初始化时传入 cookie。"
             )
+
+    def _request_115(self, method: str, url: str, **kwargs) -> "httpx.Response":
+        """使用 curl_cffi 模拟 Chrome TLS 指纹请求 115 API。
+        返回类 httpx.Response 对象（curl_cffi 兼容）。"""
+        kwargs.setdefault("headers", self._headers)
+        kwargs.setdefault("timeout", _TIMEOUT)
+        kwargs.setdefault("allow_redirects", True)
+        with CurlSession(impersonate="chrome") as s:
+            resp = s.request(method, url, **kwargs)
+        return resp
 
     def _build_share_referer(self, share_code: str, receive_code: str = "") -> str:
         return f"https://115cdn.com/s/{share_code}?password={receive_code}&"
@@ -266,40 +279,38 @@ class Pan115Saver:
             "space_used": None, "space_total": None, "error": None,
         }
 
-        async with httpx.AsyncClient(
-            headers=self._headers, follow_redirects=True, timeout=_TIMEOUT
-        ) as client:
-            try:
-                resp = await client.get(
-                    _API_STATUS_CHECK,
-                    params={"_": str(int(time.time() * 1000))},
-                )
-                status = resp.json()
-                if not status.get("state"):
-                    result["error"] = "Cookie 无效或已过期"
-                    return result
+        try:
+            import asyncio
+            resp = await asyncio.to_thread(
+                self._request_115, "GET", _API_STATUS_CHECK,
+                params={"_": str(int(time.time() * 1000))},
+            )
+            status = resp.json()
+            if not status.get("state"):
+                result["error"] = "Cookie 无效或已过期"
+                return result
 
-                resp = await client.get(_API_USER_NAV)
-                nav = resp.json()
-                if not nav.get("state"):
-                    result["error"] = nav.get("error", "获取用户信息失败")
-                    return result
+            resp = await asyncio.to_thread(
+                self._request_115, "GET", _API_USER_NAV,
+            )
+            nav = resp.json()
+            if not nav.get("state"):
+                result["error"] = nav.get("error", "获取用户信息失败")
+                return result
 
-                data = nav.get("data", {})
-                result["logged_in"] = True
-                result["user_id"] = data.get("user_id")
-                result["user_name"] = data.get("user_name")
-                self._user_id = result["user_id"] or 0
+            data = nav.get("data", {})
+            result["logged_in"] = True
+            result["user_id"] = data.get("user_id")
+            result["user_name"] = data.get("user_name")
+            self._user_id = result["user_id"] or 0
 
-                space = data.get("space_info", {})
-                if space:
-                    result["space_used"] = space.get("all_use", {}).get("size_format")
-                    result["space_total"] = space.get("all_total", {}).get("size_format")
+            space = data.get("space_info", {})
+            if space:
+                result["space_used"] = space.get("all_use", {}).get("size_format")
+                result["space_total"] = space.get("all_total", {}).get("size_format")
 
-            except httpx.HTTPStatusError as e:
-                result["error"] = f"HTTP {e.response.status_code}"
-            except Exception as e:
-                result["error"] = f"{type(e).__name__}: {e}"
+        except Exception as e:
+            result["error"] = f"{type(e).__name__}: {e}"
 
         return result
 
@@ -311,6 +322,7 @@ class Pan115Saver:
         self, share_code: str, receive_code: str = "", cid: str = "0"
     ) -> dict:
         """获取 115 分享链接的文件列表快照 (不需要登录)。"""
+        import asyncio
         params = {
             "share_code": share_code, "receive_code": receive_code,
             "cid": cid, "limit": "20", "asc": "0", "offset": "0", "format": "json",
@@ -319,12 +331,12 @@ class Pan115Saver:
             "User-Agent": _UA_DEFAULT,
             "Referer": self._build_share_referer(share_code, receive_code),
         }
-        async with httpx.AsyncClient(
-            headers=headers, follow_redirects=True, timeout=_TIMEOUT
-        ) as client:
-            resp = await client.get(_API_SHARE_SNAP, params=params)
-            resp.raise_for_status()
-            return resp.json()
+        resp = await asyncio.to_thread(
+            self._request_115, "GET", _API_SHARE_SNAP,
+            headers=headers, params=params,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     async def save_share_link(
         self, share_url: str, receive_code: str = "", target_cid: str = "0"
@@ -369,24 +381,22 @@ class Pan115Saver:
             file_ids = ",".join(
                 str(f.get("fid", f.get("file_id", ""))) for f in file_list
             )
-            async with httpx.AsyncClient(
-                headers=self._headers, follow_redirects=True, timeout=_TIMEOUT
-            ) as client:
-                resp = await client.post(
-                    _API_SHARE_SAVE,
-                    data={
-                        "share_code": share_code, "receive_code": receive_code,
-                        "cid": target_cid, "file_id": file_ids,
-                    },
+            import asyncio
+            resp = await asyncio.to_thread(
+                self._request_115, "POST", _API_SHARE_SAVE,
+                data={
+                    "share_code": share_code, "receive_code": receive_code,
+                    "cid": target_cid, "file_id": file_ids,
+                },
+            )
+            save_data = resp.json()
+            if save_data.get("state") or save_data.get("errno") == 0:
+                result["success"] = True
+                result["message"] = f"成功转存 {result['file_count']} 个文件"
+            else:
+                result["message"] = (
+                    f"转存失败: {save_data.get('error', save_data.get('msg', '未知'))}"
                 )
-                save_data = resp.json()
-                if save_data.get("state") or save_data.get("errno") == 0:
-                    result["success"] = True
-                    result["message"] = f"成功转存 {result['file_count']} 个文件"
-                else:
-                    result["message"] = (
-                        f"转存失败: {save_data.get('error', save_data.get('msg', '未知'))}"
-                    )
         except Exception as e:
             result["message"] = f"转存异常: {type(e).__name__}: {e}"
 
@@ -430,37 +440,35 @@ class Pan115Saver:
             payload_bytes = json.dumps(params, separators=(",", ":")).encode()
             encrypted = m115_encode(payload_bytes)
 
-            async with httpx.AsyncClient(
-                headers=self._headers, follow_redirects=True, timeout=_TIMEOUT
-            ) as client:
-                resp = await client.post(
-                    _API_OFFLINE_ADD,
-                    params={"t": str(int(time.time()))},
-                    data={"data": encrypted},
+            import asyncio
+            resp = await asyncio.to_thread(
+                self._request_115, "POST", _API_OFFLINE_ADD,
+                params={"t": str(int(time.time()))},
+                data={"data": encrypted},
+            )
+            resp.raise_for_status()
+            resp_data = resp.json()
+
+            if not resp_data.get("state"):
+                result["message"] = (
+                    f"离线任务添加失败: {resp_data.get('error', '未知')}"
                 )
-                resp.raise_for_status()
-                resp_data = resp.json()
+                return result
 
-                if not resp_data.get("state"):
-                    result["message"] = (
-                        f"离线任务添加失败: {resp_data.get('error', '未知')}"
-                    )
-                    return result
+            encoded_data = resp_data.get("encoded_data", "")
+            if encoded_data:
+                decoded = m115_decode(encoded_data)
+                task_info = json.loads(decoded)
+                tasks = task_info.get("result", [])
+                result["info_hashes"] = [
+                    t.get("info_hash", "") for t in tasks if t.get("info_hash")
+                ]
+                result["task_count"] = len(tasks)
+            else:
+                result["task_count"] = 1
 
-                encoded_data = resp_data.get("encoded_data", "")
-                if encoded_data:
-                    decoded = m115_decode(encoded_data)
-                    task_info = json.loads(decoded)
-                    tasks = task_info.get("result", [])
-                    result["info_hashes"] = [
-                        t.get("info_hash", "") for t in tasks if t.get("info_hash")
-                    ]
-                    result["task_count"] = len(tasks)
-                else:
-                    result["task_count"] = 1
-
-                result["success"] = True
-                result["message"] = f"已添加 {result['task_count']} 个离线任务"
+            result["success"] = True
+            result["message"] = f"已添加 {result['task_count']} 个离线任务"
 
         except Exception as e:
             result["message"] = f"离线下载异常: {type(e).__name__}: {e}"

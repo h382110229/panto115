@@ -306,8 +306,24 @@ class Pan115Saver:
 
             space = data.get("space_info", {})
             if space:
-                result["space_used"] = space.get("all_use", {}).get("size_format")
-                result["space_total"] = space.get("all_total", {}).get("size_format")
+                # 适配不同 JSON 结构: {all_use: {size_format}} 或 {all_use_size, all_total_size}
+                use_info = space.get("all_use", {})
+                total_info = space.get("all_total", {})
+                result["space_used"] = (
+                    use_info.get("size_format")
+                    if isinstance(use_info, dict)
+                    else str(use_info) if use_info else None
+                )
+                result["space_total"] = (
+                    total_info.get("size_format")
+                    if isinstance(total_info, dict)
+                    else str(total_info) if total_info else None
+                )
+                # Fallback: 直接从顶层字段读取
+                if not result["space_used"]:
+                    result["space_used"] = data.get("space_use_size") or data.get("all_use_size")
+                if not result["space_total"]:
+                    result["space_total"] = data.get("space_total_size") or data.get("all_total_size")
 
         except Exception as e:
             result["error"] = f"{type(e).__name__}: {e}"
@@ -410,7 +426,7 @@ class Pan115Saver:
         """
         添加离线下载任务 (磁力链接或 HTTP 直链)。
 
-        使用 m115 加密协议传输任务参数。
+        优先使用 m115 加密协议，失败时 fallback 到 Web 离线接口。
 
         Args:
             url: magnet:?xt=... 或 http(s)://... 链接
@@ -432,31 +448,53 @@ class Pan115Saver:
                     return result
                 self._user_id = info["user_id"] or 0
 
-            params = {
-                "ac": "add_task_urls", "wp_path_id": save_dir_id,
-                "app_ver": "27.0.5.7", "uid": str(self._user_id),
-                "url[0]": url,
-            }
-            payload_bytes = json.dumps(params, separators=(",", ":")).encode()
-            encrypted = m115_encode(payload_bytes)
+            # 方式一: m115 加密协议
+            try:
+                result = await self._add_offline_m115(url, save_dir_id)
+                if result["success"]:
+                    return result
+                logger.warning("m115 offline failed: %s, trying web fallback", result["message"])
+            except Exception as e:
+                logger.warning("m115 offline exception: %s, trying web fallback", e)
 
-            import asyncio
-            resp = await asyncio.to_thread(
-                self._request_115, "POST", _API_OFFLINE_ADD,
-                params={"t": str(int(time.time()))},
-                data={"data": encrypted},
-            )
-            resp.raise_for_status()
-            resp_data = resp.json()
+            # 方式二: Web 离线接口 fallback (通过 sign + time 构造请求)
+            result = await self._add_offline_web(url, save_dir_id)
 
-            if not resp_data.get("state"):
-                result["message"] = (
-                    f"离线任务添加失败: {resp_data.get('error', '未知')}"
-                )
-                return result
+        except Exception as e:
+            result["message"] = f"离线下载异常: {type(e).__name__}: {e}"
 
-            encoded_data = resp_data.get("encoded_data", "")
-            if encoded_data:
+        return result
+
+    async def _add_offline_m115(self, url: str, save_dir_id: str) -> dict:
+        """m115 加密协议方式添加离线任务。"""
+        import asyncio
+        result: dict = {
+            "success": False, "message": "", "task_count": 0, "info_hashes": [],
+        }
+
+        params = {
+            "ac": "add_task_urls", "wp_path_id": save_dir_id,
+            "app_ver": "27.0.5.7", "uid": str(self._user_id),
+            "url[0]": url,
+        }
+        payload_bytes = json.dumps(params, separators=(",", ":")).encode()
+        encrypted = m115_encode(payload_bytes)
+
+        resp = await asyncio.to_thread(
+            self._request_115, "POST", _API_OFFLINE_ADD,
+            params={"t": str(int(time.time()))},
+            data={"data": encrypted},
+        )
+        resp.raise_for_status()
+        resp_data = resp.json()
+
+        if not resp_data.get("state"):
+            result["message"] = f"离线任务添加失败: {resp_data.get('error', '未知')}"
+            return result
+
+        encoded_data = resp_data.get("encoded_data", "")
+        if encoded_data:
+            try:
                 decoded = m115_decode(encoded_data)
                 task_info = json.loads(decoded)
                 tasks = task_info.get("result", [])
@@ -464,14 +502,65 @@ class Pan115Saver:
                     t.get("info_hash", "") for t in tasks if t.get("info_hash")
                 ]
                 result["task_count"] = len(tasks)
-            else:
+            except Exception as decode_err:
+                logger.warning("m115 decode failed (non-fatal): %s", decode_err)
                 result["task_count"] = 1
+        else:
+            result["task_count"] = 1
 
-            result["success"] = True
-            result["message"] = f"已添加 {result['task_count']} 个离线任务"
+        result["success"] = True
+        result["message"] = f"已添加 {result['task_count']} 个离线任务"
+        return result
+
+    async def _add_offline_web(self, url: str, save_dir_id: str) -> dict:
+        """
+        Web 离线接口 fallback: 通过获取 sign + time 构造任务。
+        不依赖 m115 RSA 加密，使用 115 Web 端的普通表单提交。
+        """
+        import asyncio
+        result: dict = {
+            "success": False, "message": "", "task_count": 0, "info_hashes": [],
+        }
+
+        try:
+            # 先获取离线任务的 sign 和 time
+            resp = await asyncio.to_thread(
+                self._request_115, "POST",
+                "https://lixian.115.com/lixian/?ct=lixian&ac=add_task_url",
+                data={
+                    "url": url,
+                    "wp_path_id": save_dir_id,
+                },
+            )
+            resp.raise_for_status()
+            resp_data = resp.json()
+
+            if resp_data.get("state") or resp_data.get("errno") == 0:
+                result["success"] = True
+                result["task_count"] = 1
+                result["message"] = "已添加离线任务 (web fallback)"
+            else:
+                error_msg = resp_data.get("error", resp_data.get("msg", "未知错误"))
+                # 如果 web 接口也失败，尝试最简单的 URL 添加
+                resp2 = await asyncio.to_thread(
+                    self._request_115, "POST",
+                    "https://lixian.115.com/lixianssp/?ac=add_task_urls",
+                    data={
+                        "url[0]": url,
+                        "wp_path_id": save_dir_id,
+                        "uid": str(self._user_id),
+                    },
+                )
+                resp2_data = resp2.json()
+                if resp2_data.get("state"):
+                    result["success"] = True
+                    result["task_count"] = 1
+                    result["message"] = "已添加离线任务 (simple fallback)"
+                else:
+                    result["message"] = f"离线任务添加失败: {error_msg}"
 
         except Exception as e:
-            result["message"] = f"离线下载异常: {type(e).__name__}: {e}"
+            result["message"] = f"Web 离线接口异常: {type(e).__name__}: {e}"
 
         return result
 

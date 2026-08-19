@@ -1,23 +1,22 @@
 /**
  * Panto115 — 前端交互逻辑 (原生 JS, 零依赖)
+ *
+ * 骨架屏策略: 仅在 search() 触发时动态生成，搜索结束立即替换为真实结果。
+ * 页面初始只显示空状态欢迎语，绝无静态骨架屏。
  */
 
 (function () {
   'use strict';
 
-  // DOM
   const $ = (s) => document.querySelector(s);
   const searchInput = $('#search-input');
   const searchBtn = $('#search-btn');
   const statusEl = $('#status-indicator');
-  const resultsList = $('#results-list');
+  const container = $('#results-container');
   const resultsInfo = $('#results-info');
-  const skeleton = $('#skeleton');
-  const emptyState = $('#empty-state');
   const tags = document.querySelectorAll('.tag');
 
   let currentPan = 'all';
-  let debounceTimer = null;
 
   // -----------------------------------------------------------------------
   // Toast
@@ -31,7 +30,7 @@
   }
 
   // -----------------------------------------------------------------------
-  // API helpers
+  // API helper
   // -----------------------------------------------------------------------
   async function api(path, opts = {}) {
     const resp = await fetch(`/api${path}`, {
@@ -52,14 +51,13 @@
       if (success && data.logged_in) {
         statusEl.className = 'status-badge online';
         const space = data.space_used && data.space_total
-          ? ` · ${data.space_used} / ${data.space_total}`
-          : '';
+          ? ` · ${data.space_used} / ${data.space_total}` : '';
         statusEl.querySelector('.status-text').textContent =
           `${data.user_name || '已登录'}${space}`;
       } else {
         statusEl.className = 'status-badge offline';
         statusEl.querySelector('.status-text').textContent =
-          data.error ? `未登录: ${data.error.slice(0, 20)}` : '未登录';
+          data.error ? `未登录` : '未登录';
       }
     } catch {
       statusEl.className = 'status-badge offline';
@@ -68,7 +66,37 @@
   }
 
   // -----------------------------------------------------------------------
-  // Search
+  // 骨架屏 — 仅由 JS 动态生成
+  // -----------------------------------------------------------------------
+  function showSkeleton() {
+    resultsInfo.classList.add('hidden');
+    container.innerHTML = `
+      <div class="skeleton-grid">
+        ${Array(3).fill(`
+          <div class="skeleton-card">
+            <div class="skeleton-line w60"></div>
+            <div class="skeleton-line w80"></div>
+            <div class="skeleton-line w40"></div>
+          </div>
+        `).join('')}
+      </div>`;
+  }
+
+  // -----------------------------------------------------------------------
+  // 空状态
+  // -----------------------------------------------------------------------
+  function showEmpty() {
+    resultsInfo.classList.add('hidden');
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🔍</div>
+        <p>输入关键词搜索网盘资源，或直接粘贴 magnet 磁力 / 115 分享链接回车</p>
+        <p class="empty-hint">支持 115、夸克、阿里云盘、百度网盘等资源聚合搜索</p>
+      </div>`;
+  }
+
+  // -----------------------------------------------------------------------
+  // 搜索
   // -----------------------------------------------------------------------
   async function doSearch(query) {
     const q = query || searchInput.value.trim();
@@ -80,81 +108,74 @@
     }
 
     searchInput.value = q;
-    showLoading(true);
+    showSkeleton(); // 搜索开始时才显示骨架屏
 
     try {
       const { success, data } = await api(
         `/search?q=${encodeURIComponent(q)}&pan=${currentPan}`
       );
-      showLoading(false);
 
       if (!success || !data) {
-        showToast('搜索失败', 'error');
-        renderResults([]);
+        renderResults([], 0, 0, '搜索失败');
         return;
       }
-
-      renderResults(data.results || [], data.total, data.elapsed_ms);
+      renderResults(data.results || [], data.total, data.elapsed_ms, null, data.errors);
     } catch (e) {
-      showLoading(false);
-      showToast(`搜索异常: ${e.message}`, 'error');
-      renderResults([]);
+      renderResults([], 0, 0, `搜索异常: ${e.message}`);
     }
   }
 
   // -----------------------------------------------------------------------
-  // Save
+  // 转存
   // -----------------------------------------------------------------------
   async function doSave(url, extractCode = '') {
     if (!url) return;
     showToast('正在转存...', 'warning', 2000);
-
     try {
-      const { success, message, data } = await api('/save', {
+      const { success, message } = await api('/save', {
         method: 'POST',
         body: JSON.stringify({ url, extract_code: extractCode }),
       });
-
-      if (success) {
-        showToast(message || '转存成功!', 'success');
-      } else {
-        const msg = message || data?.message || '转存失败';
-        showToast(msg, msg.includes('暂不支持') ? 'warning' : 'error', 4000);
-      }
+      showToast(message || (success ? '转存成功!' : '转存失败'),
+        success ? 'success' : (message && message.includes('暂不支持') ? 'warning' : 'error'),
+        success ? 3000 : 4000);
     } catch (e) {
       showToast(`转存异常: ${e.message}`, 'error');
     }
   }
 
   // -----------------------------------------------------------------------
-  // Render
+  // 渲染结果
   // -----------------------------------------------------------------------
-  function showLoading(show) {
-    skeleton.classList.toggle('hidden', !show);
-    if (show) {
-      resultsList.innerHTML = '';
-      resultsInfo.classList.add('hidden');
-      emptyState.classList.add('hidden');
-    }
-  }
-
-  function renderResults(results, total, ms) {
+  function renderResults(results, total, ms, error, errors) {
     resultsInfo.classList.remove('hidden');
-    emptyState.classList.add('hidden');
 
-    if (!results || results.length === 0) {
-      resultsList.innerHTML = '';
-      resultsInfo.textContent = '无结果';
-      emptyState.classList.remove('hidden');
+    if (error) {
+      container.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><p>${esc(error)}</p></div>`;
+      resultsInfo.textContent = '';
       return;
     }
 
-    resultsInfo.innerHTML = `
-      <span>共 <strong>${total}</strong> 条结果</span>
-      <span>${ms || 0}ms</span>
-    `;
+    if (!results.length) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">😕</div>
+          <p>未找到相关资源</p>
+          <p class="empty-hint">尝试换个关键词，或直接粘贴磁力/分享链接</p>
+        </div>`;
+      resultsInfo.innerHTML = `<span>0 条结果</span><span>${ms || 0}ms</span>`;
+      return;
+    }
 
-    resultsList.innerHTML = results.map((r) => `
+    // 源分布统计
+    const srcMap = {};
+    results.forEach(r => { srcMap[r.source] = (srcMap[r.source] || 0) + 1; });
+    const srcTags = Object.entries(srcMap).map(([k, v]) => `<span class="source-badge">${k}:${v}</span>`).join(' ');
+
+    resultsInfo.innerHTML = `
+      <span>共 <strong>${total}</strong> 条结果 · ${ms || 0}ms ${srcTags}</span>`;
+
+    container.innerHTML = `<div class="results-grid">${results.map(r => `
       <div class="result-card">
         <div class="result-info">
           <div class="result-top">
@@ -168,25 +189,26 @@
           </div>
         </div>
         <div class="result-actions">
-          <button class="btn-save" onclick="Panto115.save(this,'${escAttr(r.share_url)}','${escAttr(r.extract_code || '')}')">一键转存</button>
+          <button class="btn-save" onclick="P115.save(this,'${escAttr(r.share_url)}','${escAttr(r.extract_code || '')}')">一键转存</button>
           <a class="btn-open" href="${escAttr(r.share_url)}" target="_blank" rel="noopener">打开</a>
         </div>
       </div>
-    `).join('');
+    `).join('')}</div>`;
+
+    if (errors && errors.length) {
+      showToast(`部分源异常: ${errors.join('; ')}`, 'warning', 4000);
+    }
   }
 
   function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
-  function escAttr(s) { return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+  function escAttr(s) { return (s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
 
   // -----------------------------------------------------------------------
   // Events
   // -----------------------------------------------------------------------
   searchBtn.addEventListener('click', () => doSearch());
-  searchInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') doSearch();
-  });
+  searchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
 
-  // Filter tags
   tags.forEach((tag) => {
     tag.addEventListener('click', () => {
       tags.forEach((t) => t.classList.remove('active'));
@@ -197,12 +219,12 @@
   });
 
   // -----------------------------------------------------------------------
-  // Init
+  // Init — 只显示空状态，绝不显示骨架屏
   // -----------------------------------------------------------------------
+  showEmpty();
   checkStatus();
 
-  // 暴露全局方法给 onclick
-  window.Panto115 = {
+  window.P115 = {
     async save(btn, url, code) {
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span>';

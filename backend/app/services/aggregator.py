@@ -1,13 +1,16 @@
 """
 多网盘资源异步聚合搜索服务
 
-搜索源:
-  1. upyunso.com  — 加密 API (AES-CBC + HMAC-SHA256 签名)
-  2. pansearch.me — 公开 JSON API (baidu/quark/aliyundrive/xunlei)
-  3. nyaa.si      — 公开磁力搜索 (anime/resources)
+搜索源 (6 个独立通道):
+  1. pansearch-quark    — PanSearch 夸克网盘
+  2. pansearch-aliyun   — PanSearch 阿里云盘
+  3. pansearch-baidu    — PanSearch 百度网盘
+  4. pansearch-xunlei   — PanSearch 迅雷网盘
+  5. upyunso            — UP云搜加密 API
+  6. nyaa               — Nyaa.si 磁力搜索
 
 去重: 基于 share_url 或 (title + pan_type)
-容错: asyncio.gather(return_exceptions=True)，单源超时不阻塞其他源
+容错: asyncio.gather(return_exceptions=True)，单源超时 3.5s
 """
 
 from __future__ import annotations
@@ -33,17 +36,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class SearchResult(BaseModel):
-    """单条搜索结果"""
     title: str
     pan_type: str  # 115, quark, aliyun, baidu, xunlei, magnet, other
     share_url: str
     extract_code: Optional[str] = None
     datetime: Optional[str] = None
-    source: str  # 搜索源渠道名称
+    source: str
 
 
 class SearchResponse(BaseModel):
-    """聚合搜索响应"""
     keyword: str
     total: int
     results: list[SearchResult] = Field(default_factory=list)
@@ -56,25 +57,20 @@ class SearchResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _normalize_pan_type(raw: str, url: str = "") -> str:
-    """
-    根据原始标签和 URL 域名正则强制校准网盘类型。
-    优先使用 URL 域名判断，避免源标签误判。
-    """
     url_lower = url.lower()
-
-    # URL 域名优先判断
     if "115.com" in url_lower:
         return "115"
-    if "pan.quark.cn" in url_lower or "pan.quark" in url_lower:
+    if "pan.quark.cn" in url_lower:
         return "quark"
-    if "alipan.com" in url_lower or "aliyundrive.com" in url_lower or "aliyun" in raw.lower():
+    if "alipan.com" in url_lower or "aliyundrive.com" in url_lower:
         return "aliyun"
-    if "pan.baidu.com" in url_lower or "baidu" in raw.lower():
+    if "pan.baidu.com" in url_lower:
         return "baidu"
-    if "xunlei" in url_lower or "xunlei" in raw.lower():
+    if "xunlei" in url_lower:
         return "xunlei"
+    if url_lower.startswith("magnet:"):
+        return "magnet"
 
-    # fallback 到原始标签
     raw_map = {
         "ali": "aliyun", "aliyundrive": "aliyun",
         "quark": "quark", "baidu": "baidu",
@@ -83,18 +79,83 @@ def _normalize_pan_type(raw: str, url: str = "") -> str:
     return raw_map.get(raw.lower().strip(), raw.lower().strip() or "other")
 
 
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text)
+
+
 # ---------------------------------------------------------------------------
-# UP云搜 (upyunso.com) — 加密 API
+# 超时配置 — 统一 3.5s
+# ---------------------------------------------------------------------------
+
+_TIMEOUT = 3.5
+
+# ---------------------------------------------------------------------------
+# Source 1-4: PanSearch.me — 公开 JSON API (按网盘类型分通道)
+# ---------------------------------------------------------------------------
+
+_PANSEARCH_BASE = "https://www.pansearch.me"
+_SHARE_URL_RE = re.compile(
+    r'href="(https?://pan\.(?:baidu|quark)\.cn/[^"]+)"'
+)
+_EXTRACT_CODE_RE = re.compile(r"(?:pwd|提取码)[=:]\s*([a-zA-Z0-9]{4})")
+
+
+async def _search_pansearch(
+    client: httpx.AsyncClient, keyword: str, pan: str, page: int = 1
+) -> list[SearchResult]:
+    """Search pansearch.me for a specific pan type."""
+    resp = await client.get(
+        f"{_PANSEARCH_BASE}/api/search",
+        params={"keyword": keyword, "page": page, "pan": pan},
+        timeout=_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    if "error" in data:
+        raise ValueError(f"pansearch/{pan}: {data['error']}")
+
+    results: list[SearchResult] = []
+    for item in data.get("data", []):
+        content = item.get("content", "")
+        pan_label = item.get("pan", pan)
+        time_str = item.get("time", "")
+
+        urls = _SHARE_URL_RE.findall(content)
+        if not urls:
+            continue
+
+        title_match = re.search(r"名称[：:]\s*(.+?)(?:\n|$)", content)
+        title = _strip_html(title_match.group(1).strip()) if title_match else keyword
+
+        code_match = _EXTRACT_CODE_RE.search(content)
+        extract_code = code_match.group(1) if code_match else None
+
+        for url in urls:
+            pwd_match = re.search(r"[?&]pwd=([a-zA-Z0-9]+)", url)
+            if pwd_match:
+                extract_code = extract_code or pwd_match.group(1)
+            results.append(SearchResult(
+                title=title,
+                pan_type=_normalize_pan_type(pan_label, url),
+                share_url=url,
+                extract_code=extract_code,
+                datetime=time_str,
+                source=f"pansearch-{pan}",
+            ))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Source 5: Upyunso — 加密 API
 # ---------------------------------------------------------------------------
 
 _UPYUNSO_AES_KEY = b"qq1920520460qqxx"
 _UPYUNSO_HMAC_KEY = "upyunso_hmac_s3cr3t_2026"
 _UPYUNSO_BASE = "https://www.upyunso.com"
-_UPYUNSO_TIMEOUT = 4.0
 
 
 def _upyunso_encrypt_params(params: dict) -> dict:
-    """Encrypt search params for upyunso.com API."""
     from Crypto.Cipher import AES
     from Crypto.Util.Padding import pad
 
@@ -113,14 +174,9 @@ def _upyunso_encrypt_params(params: dict) -> dict:
     return {"__payload": payload_b64, "_nonce": nonce, "_sign": sign}
 
 
-def _strip_html(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text)
-
-
 async def _search_upyunso(
     client: httpx.AsyncClient, keyword: str, page: int = 1
 ) -> list[SearchResult]:
-    """Search upyunso.com with encrypted API."""
     from Crypto.Cipher import AES
     from Crypto.Util.Padding import unpad
 
@@ -132,7 +188,7 @@ async def _search_upyunso(
     encrypted = _upyunso_encrypt_params(params)
 
     resp = await client.get(
-        f"{_UPYUNSO_BASE}/api/search", params=encrypted, timeout=_UPYUNSO_TIMEOUT,
+        f"{_UPYUNSO_BASE}/api/search", params=encrypted, timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     body = resp.json()
@@ -166,104 +222,23 @@ async def _search_upyunso(
 
 
 # ---------------------------------------------------------------------------
-# PanSearch.me — 公开 JSON API
-# ---------------------------------------------------------------------------
-
-_PANSEARCH_BASE = "https://www.pansearch.me"
-_PANSEARCH_TIMEOUT = 4.0
-_PANSEARCH_PAN_TYPES = ["baidu", "quark", "aliyundrive", "xunlei"]
-
-_SHARE_URL_RE = re.compile(
-    r'href="(https?://pan\.(?:baidu|quark)\.cn/[^"]+)"'
-)
-_EXTRACT_CODE_RE = re.compile(r"(?:pwd|提取码)[=:]\s*([a-zA-Z0-9]{4})")
-
-
-async def _search_pansearch(
-    client: httpx.AsyncClient, keyword: str, pan: str, page: int = 1
-) -> list[SearchResult]:
-    """Search pansearch.me for a specific pan type."""
-    resp = await client.get(
-        f"{_PANSEARCH_BASE}/api/search",
-        params={"keyword": keyword, "page": page, "pan": pan},
-        timeout=_PANSEARCH_TIMEOUT,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    if "error" in data:
-        raise ValueError(f"pansearch: {data['error']}")
-
-    results: list[SearchResult] = []
-    for item in data.get("data", []):
-        content = item.get("content", "")
-        pan_label = item.get("pan", pan)
-        time_str = item.get("time", "")
-
-        urls = _SHARE_URL_RE.findall(content)
-        if not urls:
-            continue
-
-        title_match = re.search(r"名称[：:]\s*(.+?)(?:\n|$)", content)
-        title = _strip_html(title_match.group(1).strip()) if title_match else keyword
-
-        code_match = _EXTRACT_CODE_RE.search(content)
-        extract_code = code_match.group(1) if code_match else None
-
-        for url in urls:
-            pwd_match = re.search(r"[?&]pwd=([a-zA-Z0-9]+)", url)
-            if pwd_match:
-                extract_code = extract_code or pwd_match.group(1)
-
-            results.append(SearchResult(
-                title=title,
-                pan_type=_normalize_pan_type(pan_label, url),
-                share_url=url,
-                extract_code=extract_code,
-                datetime=time_str,
-                source="pansearch",
-            ))
-    return results
-
-
-async def _search_pansearch_all(
-    client: httpx.AsyncClient, keyword: str, page: int = 1
-) -> list[SearchResult]:
-    """Search pansearch.me across all supported pan types concurrently."""
-    tasks = [
-        _search_pansearch(client, keyword, pan, page)
-        for pan in _PANSEARCH_PAN_TYPES
-    ]
-    all_results: list[SearchResult] = []
-    for coro in asyncio.as_completed(tasks):
-        try:
-            all_results.extend(await coro)
-        except Exception as exc:
-            logger.warning("pansearch sub-query failed: %s", exc)
-    return all_results
-
-
-# ---------------------------------------------------------------------------
-# Nyaa.si — 公开磁力搜索
+# Source 6: Nyaa.si — 公开磁力搜索
 # ---------------------------------------------------------------------------
 
 _NYAA_BASE = "https://nyaa.si"
-_NYAA_TIMEOUT = 4.0
 
 
 async def _search_nyaa(
     client: httpx.AsyncClient, keyword: str, page: int = 1
 ) -> list[SearchResult]:
-    """Search nyaa.si for magnet links."""
     resp = await client.get(
         _NYAA_BASE,
         params={"f": "0", "c": "0_0", "q": keyword, "p": str(page)},
-        timeout=_NYAA_TIMEOUT,
+        timeout=_TIMEOUT,
     )
     resp.raise_for_status()
     html = resp.text
 
-    # Parse title + magnet pairs
     titles = re.findall(r'<a href="/view/(\d+)"[^>]*title="([^"]+)"', html)
     magnets = re.findall(r'magnet:\?xt=urn:btih:([a-fA-F0-9]+)', html)
 
@@ -271,11 +246,10 @@ async def _search_nyaa(
     for i, (tid, title) in enumerate(titles):
         if i >= len(magnets):
             break
-        magnet_url = f"magnet:?xt=urn:btih:{magnets[i]}"
         results.append(SearchResult(
             title=title.strip(),
             pan_type="magnet",
-            share_url=magnet_url,
+            share_url=f"magnet:?xt=urn:btih:{magnets[i]}",
             extract_code=None,
             datetime=None,
             source="nyaa",
@@ -288,7 +262,6 @@ async def _search_nyaa(
 # ---------------------------------------------------------------------------
 
 def _dedupe(results: list[SearchResult]) -> list[SearchResult]:
-    """Deduplicate results by share_url or (title + pan_type)."""
     seen_urls: set[str] = set()
     seen_title_pan: set[tuple[str, str]] = set()
     unique: list[SearchResult] = []
@@ -311,16 +284,17 @@ def _dedupe(results: list[SearchResult]) -> list[SearchResult]:
 # Aggregator
 # ---------------------------------------------------------------------------
 
+# 搜索源定义: (name, coroutine_factory)
+_PAN_TYPES = ["quark", "aliyundrive", "baidu", "xunlei"]
+
+
 class SearchAggregator:
     """
     多网盘资源异步聚合搜索器。
-
-    并发调用多个搜索源，单个源超时或异常不影响其他源。
-    结果基于 share_url / (title + pan_type) 去重。
+    6 个独立通道并发，单源超时 3.5s，任意源异常不影响整体。
     """
 
-    def __init__(self, timeout: float = 10.0):
-        self.timeout = timeout
+    def __init__(self):
         self._headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -329,25 +303,26 @@ class SearchAggregator:
             ),
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.pansearch.me/",
         }
 
     async def search(self, keyword: str, page: int = 1) -> SearchResponse:
-        """执行聚合搜索。"""
+        """执行 6 通道并发聚合搜索。"""
         t0 = asyncio.get_event_loop().time()
         errors: list[str] = []
 
-        # 如果关键词是磁力链接，直接返回 nyaa 搜索
         if keyword.strip().startswith("magnet:"):
-            return SearchResponse(
-                keyword=keyword, total=0, results=[], errors=[], elapsed_ms=0,
-            )
+            return SearchResponse(keyword=keyword, total=0, results=[], errors=[], elapsed_ms=0)
 
         async with httpx.AsyncClient(
             headers=self._headers, follow_redirects=True
         ) as client:
+            # 6 个独立搜索通道
             sources = [
+                (f"pansearch-{pt}", _search_pansearch(client, keyword, pt, page))
+                for pt in _PAN_TYPES
+            ] + [
                 ("upyunso", _search_upyunso(client, keyword, page)),
-                ("pansearch", _search_pansearch_all(client, keyword, page)),
                 ("nyaa", _search_nyaa(client, keyword, page)),
             ]
 
@@ -383,14 +358,20 @@ class SearchAggregator:
 async def _main():
     import sys
 
-    keyword = sys.argv[1] if len(sys.argv) > 1 else "流浪地球"
+    keyword = sys.argv[1] if len(sys.argv) > 1 else "三体"
     print(f"搜索: {keyword}")
     print("=" * 60)
 
     agg = SearchAggregator()
     resp = await agg.search(keyword)
 
+    # 源分布统计
+    src_count: dict[str, int] = {}
+    for r in resp.results:
+        src_count[r.source] = src_count.get(r.source, 0) + 1
+
     print(f"共 {resp.total} 条结果 (耗时 {resp.elapsed_ms}ms)")
+    print(f"源分布: {src_count}")
     if resp.errors:
         print(f"错误: {resp.errors}")
     print("-" * 60)

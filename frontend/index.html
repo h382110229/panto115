@@ -40,29 +40,15 @@
                 <button class="tag" data-pan="quark">夸克</button>
                 <button class="tag" data-pan="aliyun">阿里</button>
                 <button class="tag" data-pan="baidu">百度</button>
-                <button class="tag" data-pan="xunlei">迅雷</button>
+                <button class="tag" data-pan="magnet">磁力</button>
             </div>
         </div>
 
         <!-- 结果统计 -->
         <div id="results-info" class="results-info hidden"></div>
 
-        <!-- 加载骨架屏 -->
-        <div id="skeleton" class="skeleton-grid hidden">
-            <div class="skeleton-card"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div>
-            <div class="skeleton-card"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div>
-            <div class="skeleton-card"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div>
-        </div>
-
-        <!-- 结果列表 -->
-        <div id="results-list" class="results-grid"></div>
-
-        <!-- 空状态 -->
-        <div id="empty-state" class="empty-state">
-            <div class="empty-icon">🔍</div>
-            <p>请输入关键词检索资源，或直接粘贴 magnet 磁力 / 115 链接</p>
-            <p class="empty-hint">支持 115、夸克、阿里云盘、百度网盘等资源聚合搜索</p>
-        </div>
+        <!-- 动态内容区：骨架屏 / 结果列表 / 空状态 均由 JS 控制 -->
+        <div id="results-container"></div>
     </div>
 
     <script src="app.js"></script>

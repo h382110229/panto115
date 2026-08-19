@@ -302,7 +302,11 @@ class Pan115Saver:
         if link_type == "aliyun":
             return await self._cross_pan_aliyun(url, extract_code)
 
-        names = {"baidu": "百度网盘", "xunlei": "迅雷网盘"}
+        # 百度跨盘转存
+        if link_type == "baidu":
+            return await self._cross_pan_baidu(url, extract_code)
+
+        names = {"xunlei": "迅雷网盘"}
         name = names.get(link_type, "该类型")
         return {
             "success": False,
@@ -376,6 +380,33 @@ class Pan115Saver:
             }
         except Exception as e:
             return {"success": False, "message": f"阿里跨盘异常: {type(e).__name__}: {e}"}
+
+    async def _cross_pan_baidu(self, url: str, extract_code: str) -> dict:
+        """百度 → 百度网盘转存（文件保存到用户的百度网盘）。"""
+        from app.config import settings as cfg
+        from app.services.bridges.baidu import BaiduBridge
+
+        if not cfg.baidu_bduss:
+            return {
+                "success": False,
+                "message": "需在 .env 配置 BAIDU_BDUSS 才能启用百度跨盘转存",
+                "link_type": "baidu",
+            }
+
+        try:
+            bridge = BaiduBridge(cfg.baidu_bduss)
+            bridge_result = bridge.transfer_share(url, "/")
+
+            if bridge_result["success"]:
+                return {
+                    "success": True,
+                    "message": f"{bridge_result['message']}（已保存到百度网盘根目录）",
+                    "data": {"file_count": bridge_result["file_count"], "link_type": "baidu"},
+                }
+            else:
+                return {"success": False, "message": bridge_result["message"]}
+        except Exception as e:
+            return {"success": False, "message": f"百度跨盘异常: {type(e).__name__}: {e}"}
 
 
 # ---------------------------------------------------------------------------

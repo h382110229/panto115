@@ -15,9 +15,10 @@ class Settings(BaseSettings):
     debug: bool = False
     http_proxy: Optional[str] = None
 
-    # 跨盘中转: 夸克 / 阿里
+    # 跨盘中转: 夸克 / 阿里 / 百度
     quark_cookie: Optional[str] = None
     aliyun_refresh_token: Optional[str] = None
+    baidu_bduss: Optional[str] = None
     auto_clean_temp: bool = True
 
 

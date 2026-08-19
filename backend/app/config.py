@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,7 @@ class Settings(BaseSettings):
     cookie_115: str = ""
     app_port: int = 8000
     debug: bool = False
+    http_proxy: Optional[str] = None  # e.g. "http://127.0.0.1:7890"
 
 
 settings = Settings()

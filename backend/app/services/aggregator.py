@@ -90,7 +90,7 @@ def _normalize_pan_type(raw: str, url: str = "") -> str:
 _UPYUNSO_AES_KEY = b"qq1920520460qqxx"
 _UPYUNSO_HMAC_KEY = "upyunso_hmac_s3cr3t_2026"
 _UPYUNSO_BASE = "https://www.upyunso.com"
-_UPYUNSO_TIMEOUT = 8.0
+_UPYUNSO_TIMEOUT = 4.0
 
 
 def _upyunso_encrypt_params(params: dict) -> dict:
@@ -170,7 +170,7 @@ async def _search_upyunso(
 # ---------------------------------------------------------------------------
 
 _PANSEARCH_BASE = "https://www.pansearch.me"
-_PANSEARCH_TIMEOUT = 8.0
+_PANSEARCH_TIMEOUT = 4.0
 _PANSEARCH_PAN_TYPES = ["baidu", "quark", "aliyundrive", "xunlei"]
 
 _SHARE_URL_RE = re.compile(
@@ -248,7 +248,7 @@ async def _search_pansearch_all(
 # ---------------------------------------------------------------------------
 
 _NYAA_BASE = "https://nyaa.si"
-_NYAA_TIMEOUT = 10.0
+_NYAA_TIMEOUT = 4.0
 
 
 async def _search_nyaa(

@@ -36,6 +36,12 @@ async def health_check():
 
 
 # 挂载前端静态文件 (映射到 Web 根路径)
-_frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend"
-if _frontend_dir.is_dir():
-    app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
+# main.py 在 /app/app/main.py，parent.parent = /app
+BASE_DIR = Path(__file__).resolve().parent.parent
+FRONTEND_DIR = BASE_DIR / "frontend"
+if not FRONTEND_DIR.exists():
+    FRONTEND_DIR = Path("/app/frontend")
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+else:
+    print(f"[Warning] Frontend directory not found! Checked: {BASE_DIR / 'frontend'}, /app/frontend")

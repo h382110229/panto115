@@ -89,7 +89,7 @@ class Pan115Saver:
                 "115 Cookie 未配置。请设置环境变量 COOKIE_115 或初始化时传入 cookie。"
             )
         if self._client is None:
-            self._client = P115Client(cookie=self._cookie)
+            self._client = P115Client(cookies=self._cookie)
         return self._client
 
     # -----------------------------------------------------------------------
@@ -129,30 +129,23 @@ class Pan115Saver:
             # 获取用户信息
             try:
                 user_info = await client.user_info(async_=True)
-                result["user_id"] = user_info.get("user_id")
-                result["user_name"] = user_info.get("user_name")
+                udata = user_info.get("data", {})
+                result["user_id"] = udata.get("user_id")
+                result["user_name"] = udata.get("user_name")
             except Exception as e:
                 logger.warning("获取用户信息失败: %s", e)
 
             # 获取空间信息
             try:
                 space = await client.fs_space_summury(async_=True)
-                # p115client 返回格式: {"total": int, "used": int, ...}
-                total = space.get("total", 0)
-                used = space.get("used", 0) or space.get("use", 0)
-                if total:
-                    result["space_total"] = _format_size(total)
-                if used:
-                    result["space_used"] = _format_size(used)
-                # Fallback: 尝试 user_space_info
-                if not result["space_total"]:
-                    space2 = await client.user_space_info(async_=True)
-                    total2 = space2.get("total", 0) or space2.get("all_total", 0)
-                    used2 = space2.get("used", 0) or space2.get("all_use", 0) or space2.get("use", 0)
-                    if total2:
-                        result["space_total"] = _format_size(total2)
-                    if used2:
-                        result["space_used"] = _format_size(used2)
+                summury = space.get("space_summury", {})
+                all_total = summury.get("all_total", {})
+                all_remain = summury.get("all_remain", {})
+                if all_total.get("size"):
+                    result["space_total"] = all_total.get("size_format", "")
+                if all_total.get("size") and all_remain.get("size"):
+                    used_bytes = int(all_total["size"]) - int(all_remain["size"])
+                    result["space_used"] = _format_size(used_bytes)
             except Exception as e:
                 logger.warning("获取空间信息失败: %s", e)
 
@@ -250,10 +243,16 @@ class Pan115Saver:
                 async_=True,
             )
 
-            if resp.get("state") or resp.get("errno") == 0:
+            # p115client 响应嵌套在 data 下
+            data = resp.get("data", resp)
+            state = data.get("state", False)
+            errcode = data.get("errcode", 0)
+            error_msg = data.get("error_msg", resp.get("error_msg", ""))
+
+            # errcode 10008 = 任务已存在，视为成功
+            if state or errcode == 0 or errcode == 10008:
                 result["success"] = True
-                # 解析任务信息
-                task_list = resp.get("result", resp.get("task_list", []))
+                task_list = data.get("result", data.get("task_list", []))
                 if isinstance(task_list, list):
                     result["task_count"] = len(task_list)
                     result["info_hashes"] = [
@@ -261,9 +260,11 @@ class Pan115Saver:
                     ]
                 else:
                     result["task_count"] = 1
-                result["message"] = f"已添加 {result['task_count']} 个离线任务"
+                if errcode == 10008:
+                    result["message"] = f"任务已存在（{result['task_count']} 个文件）"
+                else:
+                    result["message"] = f"已添加 {result['task_count']} 个离线任务"
             else:
-                error_msg = resp.get("error", resp.get("msg", "未知错误"))
                 result["message"] = f"离线任务添加失败: {error_msg}"
 
         except Exception as e:

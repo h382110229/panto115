@@ -9,10 +9,16 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    # 115 网盘
     cookie_115: str = ""
     app_port: int = 8000
     debug: bool = False
-    http_proxy: Optional[str] = None  # e.g. "http://127.0.0.1:7890"
+    http_proxy: Optional[str] = None
+
+    # 跨盘中转: 夸克 / 阿里
+    quark_cookie: Optional[str] = None
+    aliyun_refresh_token: Optional[str] = None
+    auto_clean_temp: bool = True
 
 
 settings = Settings()

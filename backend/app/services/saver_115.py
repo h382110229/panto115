@@ -282,7 +282,8 @@ class Pan115Saver:
 
         - 115 分享 → save_share_link
         - magnet / http → add_offline_task
-        - 其他网盘 → 友好提示
+        - 夸克/阿里 → 通过 Bridge 中转到 115 离线下载
+        - 其他 → 友好提示
         """
         link_type = classify_url(url)
         logger.info("auto_save: type=%s, url=%s", link_type, url[:60])
@@ -293,14 +294,88 @@ class Pan115Saver:
         if link_type in ("magnet", "http"):
             return await self.add_offline_task(url)
 
-        names = {"quark": "夸克网盘", "aliyun": "阿里云盘", "baidu": "百度网盘"}
+        # 夸克跨盘转存
+        if link_type == "quark":
+            return await self._cross_pan_quark(url, extract_code)
+
+        # 阿里跨盘转存
+        if link_type == "aliyun":
+            return await self._cross_pan_aliyun(url, extract_code)
+
+        names = {"baidu": "百度网盘", "xunlei": "迅雷网盘"}
         name = names.get(link_type, "该类型")
         return {
             "success": False,
             "message": f"暂不支持直接跨盘转存{name}链接，建议通过离线或手动转存。",
             "link_type": link_type,
-            "suggestion": "可尝试将资源离线下载后手动上传到 115。",
         }
+
+    async def _cross_pan_quark(self, url: str, extract_code: str) -> dict:
+        """夸克 → 115 跨盘中转。"""
+        from app.config import settings as cfg
+        from app.services.bridges.quark import QuarkBridge
+
+        if not cfg.quark_cookie:
+            return {
+                "success": False,
+                "message": "需在 .env 配置 QUARK_COOKIE 才能启用夸克跨盘转存",
+                "link_type": "quark",
+            }
+
+        try:
+            bridge = QuarkBridge(cfg.quark_cookie)
+            bridge_result = await bridge.transfer_share(url, extract_code)
+
+            if not bridge_result["success"]:
+                return {"success": False, "message": bridge_result["message"]}
+
+            # 将直链推送到 115 离线下载
+            offline_results = []
+            for dl_url in bridge_result["download_urls"]:
+                r = await self.add_offline_task(dl_url)
+                offline_results.append(r)
+
+            success_count = sum(1 for r in offline_results if r.get("success"))
+            return {
+                "success": success_count > 0,
+                "message": f"已成功解析夸克直链并推送到 115 离线下载！({success_count}/{len(offline_results)})",
+                "data": {"task_count": success_count, "file_count": bridge_result["file_count"]},
+            }
+        except Exception as e:
+            return {"success": False, "message": f"夸克跨盘异常: {type(e).__name__}: {e}"}
+
+    async def _cross_pan_aliyun(self, url: str, extract_code: str) -> dict:
+        """阿里 → 115 跨盘中转。"""
+        from app.config import settings as cfg
+        from app.services.bridges.aliyun import AliyunBridge
+
+        if not cfg.aliyun_refresh_token:
+            return {
+                "success": False,
+                "message": "需在 .env 配置 ALIYUN_REFRESH_TOKEN 才能启用阿里跨盘转存",
+                "link_type": "aliyun",
+            }
+
+        try:
+            bridge = AliyunBridge(cfg.aliyun_refresh_token)
+            bridge_result = await bridge.transfer_share(url, extract_code)
+
+            if not bridge_result["success"]:
+                return {"success": False, "message": bridge_result["message"]}
+
+            offline_results = []
+            for dl_url in bridge_result["download_urls"]:
+                r = await self.add_offline_task(dl_url)
+                offline_results.append(r)
+
+            success_count = sum(1 for r in offline_results if r.get("success"))
+            return {
+                "success": success_count > 0,
+                "message": f"已成功解析阿里直链并推送到 115 离线下载！({success_count}/{len(offline_results)})",
+                "data": {"task_count": success_count, "file_count": bridge_result["file_count"]},
+            }
+        except Exception as e:
+            return {"success": False, "message": f"阿里跨盘异常: {type(e).__name__}: {e}"}
 
 
 # ---------------------------------------------------------------------------

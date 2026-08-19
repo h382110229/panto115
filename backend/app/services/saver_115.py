@@ -393,8 +393,15 @@ class Pan115Saver:
                 "link_type": "baidu",
             }
 
+        if not cfg.baidu_stoken:
+            return {
+                "success": False,
+                "message": "需在 .env 配置 BAIDU_STOKEN 才能启用百度跨盘转存（从浏览器 cookie 获取）",
+                "link_type": "baidu",
+            }
+
         try:
-            bridge = BaiduBridge(cfg.baidu_bduss)
+            bridge = BaiduBridge(cfg.baidu_bduss, cfg.baidu_stoken)
             bridge_result = bridge.transfer_share(url, "/")
 
             if bridge_result["success"]:

@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     quark_cookie: Optional[str] = None
     aliyun_refresh_token: Optional[str] = None
     baidu_bduss: Optional[str] = None
+    baidu_stoken: Optional[str] = None
     auto_clean_temp: bool = True
 
 

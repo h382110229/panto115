@@ -27,6 +27,7 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 import httpx
+from curl_cffi import requests as curl_requests
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +88,12 @@ def _extract_share_info(url: str) -> dict:
     return result
 
 
-def _parse_bduss_to_cookie(bduss: str) -> str:
-    """将 BDUSS 值转换为完整的 Cookie 字符串。"""
-    return f"BDUSS={bduss}"
+def _parse_bduss_to_cookie(bduss: str, stoken: str = "") -> str:
+    """将 BDUSS + STOKEN 值转换为完整的 Cookie 字符串。"""
+    cookie = f"BDUSS={bduss}"
+    if stoken:
+        cookie += f"; STOKEN={stoken}"
+    return cookie
 
 
 # ---------------------------------------------------------------------------
@@ -106,18 +110,20 @@ class BaiduBridge:
       - 转存文件到用户网盘
     """
 
-    def __init__(self, bduss: str):
+    def __init__(self, bduss: str, stoken: str = ""):
         """
         初始化百度网盘桥接器。
 
         Args:
             bduss: 百度网盘 BDUSS Cookie 值
+            stoken: 百度网盘 STOKEN Cookie 值（可选，用于 Web API 操作）
         """
         if not bduss:
             raise ValueError("BDUSS 不能为空")
 
         self._bduss = bduss
-        self._cookie = _parse_bduss_to_cookie(bduss)
+        self._stoken = stoken
+        self._cookie = _parse_bduss_to_cookie(bduss, stoken)
         self._bdstoken = ""
         self._client = httpx.Client(
             headers={**_HEADERS, "Cookie": self._cookie},
@@ -145,7 +151,7 @@ class BaiduBridge:
         if data.get("errno", -1) != 0:
             raise RuntimeError(f"获取 bdstoken 失败: {data}")
 
-        self._bdstoken = data.get("data", {}).get("bdstoken", "")
+        self._bdstoken = data.get("data", data.get("result", {})).get("bdstoken", "")
         if not self._bdstoken:
             raise RuntimeError("bdstoken 为空，请检查 BDUSS 是否有效")
 
@@ -180,8 +186,15 @@ class BaiduBridge:
         resp.raise_for_status()
         data = resp.json()
 
-        if data.get("errno", -1) != 0:
-            error_msg = data.get("show_msg", data.get("errmsg", "未知错误"))
+        errno = data.get("errno", -1)
+        if errno != 0:
+            err_map = {
+                -1: "链接不存在或已过期",
+                -9: "提取码错误",
+                105: "分享链接已过期或被取消",
+                106: "分享链接已被和谐",
+            }
+            error_msg = err_map.get(errno, data.get("show_msg", data.get("errmsg", f"errno={errno}")))
             raise RuntimeError(f"提取码验证失败: {error_msg}")
 
         randsk = data.get("randsk", "")
@@ -212,25 +225,51 @@ class BaiduBridge:
             randsk = self.verify_pass_code(surl, share_info["pass_code"])
             cookie += f"; bdclnd={randsk}"
 
-        # 访问分享页面获取 shareid 和 uk
-        resp = self._client.get(
-            f"{_BASE_URL}/share/init",
-            params={"surl": surl},
-            headers={**_HEADERS, "Cookie": cookie},
-        )
-        resp.raise_for_status()
-        html = resp.text
+        # 获取 shareid 和 uk
+        # 方法1: 从 /share/init 页面提取 (用 curl_cffi 避免 gzip 问题)
+        shareid = ""
+        uk = ""
+        try:
+            resp = curl_requests.get(
+                f"{_BASE_URL}/share/init",
+                params={"surl": surl},
+                headers={**_HEADERS, "Cookie": cookie},
+                impersonate="chrome",
+                allow_redirects=True,
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                shareid_match = re.search(r'"shareid"\s*:\s*(\d+)', resp.text)
+                uk_match = re.search(r'"uk"\s*:\s*(\d+)', resp.text)
+                if shareid_match:
+                    shareid = shareid_match.group(1)
+                if uk_match:
+                    uk = uk_match.group(1)
+        except Exception as e:
+            logger.warning("share/init 页面访问失败: %s", e)
 
-        # 从页面中提取 shareid 和 uk
-        shareid_match = re.search(r'"shareid"\s*:\s*(\d+)', html)
-        uk_match = re.search(r'"uk"\s*:\s*(\d+)', html)
+        # 方法2: 从 verify 响应 cookie 或 REST API 获取
+        if not shareid or not uk:
+            try:
+                resp = self._client.get(
+                    f"{_BASE_URL}/share/getshareinfo",
+                    params={"surl": surl, "app_id": 250528, "clienttype": 0},
+                )
+                data = resp.json()
+                if data.get("errno", -1) == 0:
+                    shareid = str(data.get("shareid", ""))
+                    uk = str(data.get("uk", ""))
+            except Exception as e:
+                logger.warning("getshareinfo 失败: %s", e)
 
-        if not shareid_match or not uk_match:
-            raise RuntimeError("无法从分享页面提取 shareid 或 uk")
+        if not shareid or not uk:
+            raise RuntimeError(
+                f"无法获取分享信息 (shareid/uk)。链接可能已过期或无效: surl={surl}"
+            )
 
         return {
-            "shareid": shareid_match.group(1),
-            "uk": uk_match.group(1),
+            "shareid": shareid,
+            "uk": uk,
             "surl": surl,
             "pass_code": share_info["pass_code"],
             "cookie": cookie,
@@ -304,12 +343,13 @@ class BaiduBridge:
                     "channel": "chunlei",
                     "web": 1,
                     "clienttype": 0,
+                    "bdstoken": bdstoken,
                 },
                 data={
                     "fsidlist": f"[{fsid_str}]",
                     "path": target_path,
                 },
-                headers={**_HEADERS, "Cookie": cookie, "bdstoken": bdstoken},
+                headers={**_HEADERS, "Cookie": cookie},
             )
             resp.raise_for_status()
             transfer_data = resp.json()
@@ -342,7 +382,7 @@ class BaiduBridge:
 # Convenience Function
 # ---------------------------------------------------------------------------
 
-def transfer_baidu_share(bduss: str, url: str, target_path: str = "/") -> dict:
+def transfer_baidu_share(bduss: str, url: str, target_path: str = "/", stoken: str = "") -> dict:
     """
     便捷函数: 转存百度网盘分享链接。
 
@@ -350,9 +390,10 @@ def transfer_baidu_share(bduss: str, url: str, target_path: str = "/") -> dict:
         bduss: 百度网盘 BDUSS Cookie
         url: 分享链接
         target_path: 目标路径
+        stoken: 百度网盘 STOKEN Cookie（可选）
 
     Returns:
         转存结果字典
     """
-    with BaiduBridge(bduss) as bridge:
+    with BaiduBridge(bduss, stoken) as bridge:
         return bridge.transfer_share(url, target_path)

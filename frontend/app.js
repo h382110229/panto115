@@ -2,7 +2,7 @@
  * Panto115 — 前端交互逻辑 (原生 JS, 零依赖)
  *
  * 骨架屏策略: 仅在 search() 触发时动态生成，搜索结束立即替换为真实结果。
- * 页面初始只显示空状态欢迎语，绝无静态骨架屏。
+ * 按钮文案: 根据 pan_type 动态适配 (转存到115 / 跨盘转115 / 存到百度盘)
  */
 
 (function () {
@@ -56,8 +56,7 @@
           `${data.user_name || '已登录'}${space}`;
       } else {
         statusEl.className = 'status-badge offline';
-        statusEl.querySelector('.status-text').textContent =
-          data.error ? `未登录` : '未登录';
+        statusEl.querySelector('.status-text').textContent = '未登录';
       }
     } catch {
       statusEl.className = 'status-badge offline';
@@ -96,19 +95,36 @@
   }
 
   // -----------------------------------------------------------------------
+  // 按钮文案与样式 — 根据 pan_type 动态适配
+  // -----------------------------------------------------------------------
+  function getButtonInfo(panType) {
+    switch (panType) {
+      case '115':
+      case 'magnet':
+        return { label: '转存到 115', cls: 'btn-115' };
+      case 'quark':
+      case 'aliyun':
+        return { label: '跨盘转 115', cls: 'btn-cross' };
+      case 'baidu':
+        return { label: '存到百度盘', cls: 'btn-baidu' };
+      default:
+        return { label: '打开原链接', cls: 'btn-open' };
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // 搜索
   // -----------------------------------------------------------------------
   async function doSearch(query) {
     const q = query || searchInput.value.trim();
     if (!q) return;
 
-    // 磁力链接或 115 链接 → 直接转存
     if (/^magnet:/i.test(q) || /115\.com\/s\//.test(q) || /^[a-zA-Z0-9]{12,16}$/.test(q)) {
-      return doSave(q);
+      return doSave(q, '', '115');
     }
 
     searchInput.value = q;
-    showSkeleton(); // 搜索开始时才显示骨架屏
+    showSkeleton();
 
     try {
       const { success, data } = await api(
@@ -126,19 +142,31 @@
   }
 
   // -----------------------------------------------------------------------
-  // 转存
+  // 转存 — 根据 panType 显示不同 Toast
   // -----------------------------------------------------------------------
-  async function doSave(url, extractCode = '') {
+  async function doSave(url, extractCode, panType) {
     if (!url) return;
     showToast('正在转存...', 'warning', 2000);
+
     try {
       const { success, message } = await api('/save', {
         method: 'POST',
         body: JSON.stringify({ url, extract_code: extractCode }),
       });
-      showToast(message || (success ? '转存成功!' : '转存失败'),
-        success ? 'success' : (message && message.includes('暂不支持') ? 'warning' : 'error'),
-        success ? 3000 : 4000);
+
+      if (success) {
+        // 根据 panType 显示不同成功提示
+        if (panType === 'quark' || panType === 'aliyun') {
+          showToast('已转存自盘并成功推送 115 离线下载！', 'success', 4000);
+        } else if (panType === 'baidu') {
+          showToast('文件已成功转存至您的百度网盘根目录（百度不支持直链中转至 115）', 'success', 5000);
+        } else {
+          showToast(message || '转存成功!', 'success');
+        }
+      } else {
+        const isWarning = message && (message.includes('暂不支持') || message.includes('需在 .env'));
+        showToast(message || '转存失败', isWarning ? 'warning' : 'error', 4000);
+      }
     } catch (e) {
       showToast(`转存异常: ${e.message}`, 'error');
     }
@@ -167,7 +195,6 @@
       return;
     }
 
-    // 源分布统计
     const srcMap = {};
     results.forEach(r => { srcMap[r.source] = (srcMap[r.source] || 0) + 1; });
     const srcTags = Object.entries(srcMap).map(([k, v]) => `<span class="source-badge">${k}:${v}</span>`).join(' ');
@@ -175,7 +202,13 @@
     resultsInfo.innerHTML = `
       <span>共 <strong>${total}</strong> 条结果 · ${ms || 0}ms ${srcTags}</span>`;
 
-    container.innerHTML = `<div class="results-grid">${results.map(r => `
+    container.innerHTML = `<div class="results-grid">${results.map(r => {
+      const btn = getButtonInfo(r.pan_type);
+      const btnAction = r.pan_type === 'baidu'
+        ? `P115.save(this,'${escAttr(r.share_url)}','${escAttr(r.extract_code || '')}','baidu')`
+        : `P115.save(this,'${escAttr(r.share_url)}','${escAttr(r.extract_code || '')}','${r.pan_type}')`;
+
+      return `
       <div class="result-card">
         <div class="result-info">
           <div class="result-top">
@@ -189,11 +222,11 @@
           </div>
         </div>
         <div class="result-actions">
-          <button class="btn-save" onclick="P115.save(this,'${escAttr(r.share_url)}','${escAttr(r.extract_code || '')}')">一键转存</button>
+          <button class="btn-save ${btn.cls}" onclick="${btnAction}">${btn.label}</button>
           <a class="btn-open" href="${escAttr(r.share_url)}" target="_blank" rel="noopener">打开</a>
         </div>
-      </div>
-    `).join('')}</div>`;
+      </div>`;
+    }).join('')}</div>`;
 
     if (errors && errors.length) {
       showToast(`部分源异常: ${errors.join('; ')}`, 'warning', 4000);
@@ -219,18 +252,19 @@
   });
 
   // -----------------------------------------------------------------------
-  // Init — 只显示空状态，绝不显示骨架屏
+  // Init
   // -----------------------------------------------------------------------
   showEmpty();
   checkStatus();
 
   window.P115 = {
-    async save(btn, url, code) {
+    async save(btn, url, code, panType) {
       btn.disabled = true;
       btn.innerHTML = '<span class="spinner"></span>';
-      await doSave(url, code);
+      await doSave(url, code, panType);
       btn.disabled = false;
-      btn.textContent = '一键转存';
+      const info = getButtonInfo(panType);
+      btn.textContent = info.label;
     },
   };
 })();

@@ -139,6 +139,14 @@ body {
 .btn-open { background: transparent; color: var(--text-secondary); }
 .btn-open:hover { border-color: var(--text); color: var(--text); }
 
+/* Button variants by pan_type */
+.btn-115 { background: #2563eb; border-color: #2563eb; }
+.btn-115:hover { background: #1d4ed8; }
+.btn-cross { background: #7c3aed; border-color: #7c3aed; }
+.btn-cross:hover { background: #6d28d9; }
+.btn-baidu { background: #dc2626; border-color: #dc2626; }
+.btn-baidu:hover { background: #b91c1c; }
+
 /* Skeleton */
 .skeleton-grid { display: grid; gap: 12px; }
 .skeleton-card {
